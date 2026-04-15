@@ -1,0 +1,15 @@
+## Interface: 120001, 120005
+## Title: BarbarianInspect
+## Notes: Raid/party inspect - items, enchants, gems quality
+## Author: cptshooter12
+## Version: 1.0.0
+## IconTexture: Interface\AddOns\BarbarianInspect\Media\icon
+## SavedVariables: BarbarianInspectDB
+
+Init.lua
+Core\Events.lua
+Core\Inspect.lua
+Core\Report.lua
+UI\Minimap.lua
+UI\MainFrame.lua
+BarbarianInspect.lua
