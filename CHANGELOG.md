@@ -2,6 +2,22 @@
 
 All notable changes to this project. Dates in YYYY-MM-DD.
 
+## [1.0.2] — 2026-04-16
+
+### Added
+- **Progress counter** (`Loaded: X/Y`) in the bottom-right of the window, next to the Refresh button. Updates in real time as inspects complete.
+- **Chat status** — prints `Refreshing N player(s)...` when a batch begins and `Refresh complete.` once the last stub resolves. Per-row refresh stays quiet.
+- **Per-row refresh button** — refresh arrow icon right of the magnifying glass. Click re-queues inspect for that one player (or immediately re-collects own gear for self).
+
+### Changed
+- **Faster inspect queue** — throttle 0.3s → 0.2s, external-inspect backoff 2s → 0.5s. Real-world 25-man raid loads in ~12-17s instead of ~40s.
+- **Piggyback on other addons' inspects** — if MRT / RaiderIO / anyone fires `NotifyInspect` and we have the target as a stub, we grab the data from `INSPECT_READY` too. In a raid with multiple inspect-using addons the effective rate roughly doubles.
+- **`QueueInspect` returns a bool** so `RefreshAll` counts only newly added entries. Prevents the duplicated `Refreshing N players...` spam that was printed every `GROUP_ROSTER_UPDATE`.
+- **`ProcessInspectQueue` no longer drops units on `CanInspect == false`** — it retries each tick until the target enters range. Previously a raid full of out-of-range players drained the queue on the first tick and never recovered.
+
+### Fixed
+- **Ziemniak / Report no longer flags stub players.** `CollectIssues` now returns `nil` for stubs, so not-yet-inspected players aren't reported as `crafts 0/2` (which happened because the default threshold is 2 and stub data has zero items). Whisper and report only target players whose gear has actually been scanned.
+
 ## [1.0.1] — 2026-04-16
 
 Release infrastructure, no code changes.

@@ -30,15 +30,17 @@ local REPORTBAR_H   = 24
 -- Scroll goes below the report bar.
 local SCROLL_Y      = REPORTBAR_Y - REPORTBAR_H - 4
 
--- Frame width: left/right insets + slots column + inspect column + scrollbar + padding buffer.
+-- Frame width: left/right insets + slots + action icons column + scrollbar.
 local LEFT_INSET       = 12
 local RIGHT_INSET      = 30
 local SCROLLBAR_W      = 24
 local INSPECT_BTN_W    = ICON_SIZE
-local INSPECT_BTN_GAP  = 8
-local INSPECT_COL_W    = INSPECT_BTN_GAP + INSPECT_BTN_W
+local REFRESH_BTN_W    = ICON_SIZE
+local ACTION_BTN_GAP   = 4
+local ACTION_COL_GAP   = 8
+local ACTIONS_COL_W    = ACTION_COL_GAP + INSPECT_BTN_W + ACTION_BTN_GAP + REFRESH_BTN_W
 local FRAME_WIDTH      = SLOTS_X + #addon.SLOTS * (ICON_SIZE + ICON_GAP)
-                       + INSPECT_COL_W
+                       + ACTIONS_COL_W
                        + LEFT_INSET + RIGHT_INSET + SCROLLBAR_W + 10
 
 local MIN_FRAME_HEIGHT = 260
@@ -86,6 +88,12 @@ refreshBtn:SetSize(80, 22)
 refreshBtn:SetPoint("BOTTOMRIGHT", -10, 6)
 refreshBtn:SetText("Refresh")
 refreshBtn:SetScript("OnClick", function() addon:RefreshAll() end)
+
+-- Progress counter (Loaded: X/Y) sits left of the Refresh button.
+local progressText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+progressText:SetPoint("RIGHT", refreshBtn, "LEFT", -10, 0)
+progressText:SetText("")
+frame.progressText = progressText
 
 ------------------------------------------------------------------------------
 -- Sort bar
@@ -319,8 +327,10 @@ local function CreateRow(index)
         row.slots[i] = s
     end
 
-    -- Inspect magnifying-glass button in the last column
-    local inspectX = SLOTS_X + #addon.SLOTS * (ICON_SIZE + ICON_GAP) + INSPECT_BTN_GAP
+    -- Actions column: inspect magnifying glass + refresh button
+    local inspectX = SLOTS_X + #addon.SLOTS * (ICON_SIZE + ICON_GAP) + ACTION_COL_GAP
+    local refreshX = inspectX + INSPECT_BTN_W + ACTION_BTN_GAP
+
     local inspectBtn = CreateFrame("Button", nil, row)
     inspectBtn:SetSize(INSPECT_BTN_W, INSPECT_BTN_W)
     inspectBtn:SetPoint("LEFT", row, "LEFT", inspectX, 0)
@@ -357,6 +367,46 @@ local function CreateRow(index)
 
     row.inspectBtn = inspectBtn
 
+    -- Per-row refresh button
+    local rowRefreshBtn = CreateFrame("Button", nil, row)
+    rowRefreshBtn:SetSize(REFRESH_BTN_W, REFRESH_BTN_W)
+    rowRefreshBtn:SetPoint("LEFT", row, "LEFT", refreshX, 0)
+    rowRefreshBtn:SetNormalTexture("Interface\\Buttons\\UI-RefreshButton")
+    rowRefreshBtn:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+    rowRefreshBtn:GetHighlightTexture():SetBlendMode("ADD")
+
+    rowRefreshBtn:SetScript("OnClick", function(self)
+        local data = self.data
+        if not data or not data.unit then return end
+        if UnitIsUnit(data.unit, "player") then
+            local fresh = addon.CollectGearForUnit("player")
+            if fresh then
+                addon.inspectData[fresh.guid] = fresh
+                if addon.RefreshMainFrame then addon.RefreshMainFrame() end
+            end
+        else
+            -- Reset to stub so the UI shows "..." while the inspect reloads,
+            -- then re-queue.
+            local stub = addon.CollectStubData(data.unit)
+            if stub then
+                addon.inspectData[stub.guid] = stub
+                addon:QueueInspect(data.unit)
+                if addon.RefreshMainFrame then addon.RefreshMainFrame() end
+            end
+        end
+    end)
+
+    rowRefreshBtn:SetScript("OnEnter", function(self)
+        local data = self.data
+        if not data then return end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Refresh " .. (data.name or "?"))
+        GameTooltip:Show()
+    end)
+    rowRefreshBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    row.rowRefreshBtn = rowRefreshBtn
+
     return row
 end
 
@@ -365,6 +415,7 @@ local function UpdateRow(row, data)
     row:Show()
 
     if row.inspectBtn then row.inspectBtn.data = data end
+    if row.rowRefreshBtn then row.rowRefreshBtn.data = data end
 
     local color = RAID_CLASS_COLORS[data.class or ""]
     if color then
@@ -498,6 +549,17 @@ local function Refresh()
     end
 
     content:SetHeight(math.max(#list * ROW_H + 10, 100))
+
+    -- Progress counter: how many rows have full gear data vs total.
+    local total, done = #list, 0
+    for _, d in ipairs(list) do
+        if not d.stub then done = done + 1 end
+    end
+    if total == 0 then
+        progressText:SetText("")
+    else
+        progressText:SetText(("Loaded: %d/%d"):format(done, total))
+    end
 end
 addon.RefreshMainFrame = Refresh
 addon.UpdateSortButtons = UpdateSortButtons

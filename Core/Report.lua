@@ -33,6 +33,11 @@ local function PlainName(data)
 end
 
 local function CollectIssues(data, craftThreshold)
+    -- Skip stubs: we have no gear data yet so "0 crafted" is meaningless, not
+    -- a real issue. Previously this caused Ziemniak to whisper every not-yet-
+    -- inspected player because craftedCount < threshold matched by default.
+    if not data or data.stub then return nil end
+
     local missingEnch, missingGem = {}, {}
     local craftedCount = 0
 

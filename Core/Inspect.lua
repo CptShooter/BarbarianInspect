@@ -29,19 +29,21 @@ end
 local ENCHANTED_PREFIX = StripFormat(ENCHANTED_TOOLTIP_LINE or "Enchanted: %s")
 local CRAFTED_PREFIX   = StripFormat(ITEM_CREATED_BY         or "Crafted by %s")
 
--- Minimum time between our NotifyInspect calls. Server-side rate limit is
--- lenient (~0.1-0.2s); 0.3s is a safe lower bound. We ALSO fire the next
--- request immediately when INSPECT_READY arrives, so the throttle only applies
--- when the server is still processing.
-local INSPECT_THROTTLE      = 0.3
-local INSPECT_TIMEOUT       = 6.0
+-- Minimum time between our NotifyInspect calls. Throttle only applies when the
+-- server hasn't returned INSPECT_READY yet; on INSPECT_READY we fire the next
+-- request immediately. MRT uses a similar pattern.
+local INSPECT_THROTTLE      = 0.2
+local INSPECT_TIMEOUT       = 5.0
 -- Back off this long when a different addon triggers an inspect we don't own.
-local OTHER_INSPECT_BACKOFF = 2.0
+-- Kept short because we still collect data from their INSPECT_READY events
+-- (piggyback), so the backoff only exists to avoid cancelling their request.
+local OTHER_INSPECT_BACKOFF = 0.5
 
-local lastInspectAt  = 0
-local pendingGUID    = nil
-local pendingSince   = 0
-local ourInspectCall = false  -- set true just before WE call NotifyInspect
+local lastInspectAt    = 0
+local pendingGUID      = nil
+local pendingSince     = 0
+local ourInspectCall   = false  -- set true just before WE call NotifyInspect
+local lastPendingCount = 0      -- stub count snapshot, used for completion detection
 
 local function BuildUnitList()
     local units = {}
@@ -272,11 +274,16 @@ local function CollectGearForUnit(unit)
 end
 addon.CollectGearForUnit = CollectGearForUnit
 
+-- Returns true if the unit was newly added to the queue (so callers like
+-- RefreshAll can count without double-counting already-queued players).
 function addon:QueueInspect(unit)
-    if not unit or not UnitExists(unit) then return end
-    if UnitIsUnit(unit, "player") then return end
-    if not CanInspect(unit, false) then return end
+    if not unit or not UnitExists(unit) then return false end
+    if UnitIsUnit(unit, "player") then return false end
+    if self.inspectQueue[unit] then return false end
+    -- Queue even if CanInspect is currently false (out of range / zoning) —
+    -- ProcessInspectQueue will retry each tick until it becomes true.
     self.inspectQueue[unit] = GetTime()
+    return true
 end
 
 function addon:ProcessInspectQueue()
@@ -294,7 +301,10 @@ function addon:ProcessInspectQueue()
     if (now - lastInspectAt) < INSPECT_THROTTLE then return end
 
     for unit in pairs(self.inspectQueue) do
-        if UnitExists(unit) and CanInspect(unit, false) then
+        if not UnitExists(unit) then
+            -- Player gone from the group entirely — drop.
+            self.inspectQueue[unit] = nil
+        elseif CanInspect(unit, false) then
             pendingGUID   = UnitGUID(unit)
             pendingSince  = now
             lastInspectAt = now
@@ -303,9 +313,8 @@ function addon:ProcessInspectQueue()
             ourInspectCall = false
             self.inspectQueue[unit] = nil
             return
-        else
-            self.inspectQueue[unit] = nil
         end
+        -- Else: CanInspect false (out of range, zoning) — keep in queue, retry next tick.
     end
 end
 
@@ -339,15 +348,24 @@ function addon:RefreshAll()
         end
     end
 
-    -- Phase 2 (cheap): queue inspects for others.
+    -- Phase 2 (cheap): queue inspects for others. Count only the ones we
+    -- actually added (not the ones already in the queue from a prior call).
+    local queuedCount = 0
     for _, u in ipairs(units) do
         if not UnitIsUnit(u, "player") then
             local guid = UnitGUID(u)
             local existing = guid and self.inspectData[guid]
             if not existing or existing.stub then
-                self:QueueInspect(u)
+                if self:QueueInspect(u) then
+                    queuedCount = queuedCount + 1
+                end
             end
         end
+    end
+
+    if queuedCount > 0 then
+        self:Print(("Refreshing %d player(s)..."):format(queuedCount))
+        lastPendingCount = queuedCount  -- so completion detection fires for this batch
     end
 
     -- Paint the stubs immediately.
@@ -367,24 +385,44 @@ function addon:RefreshAll()
 end
 
 function addon.events:INSPECT_READY(guid)
-    if pendingGUID ~= guid then return end
+    -- Piggyback on other addons' inspects: if INSPECT_READY fires for a GUID we
+    -- have as a stub, collect data regardless of who initiated. MRT does the
+    -- same trick — it's why their inspect feels faster when multiple addons
+    -- are active.
+    local existing = self.inspectData[guid]
+    local shouldCollect = existing and existing.stub
 
-    for _, unit in ipairs(BuildUnitList()) do
-        if UnitGUID(unit) == guid then
-            local data = CollectGearForUnit(unit)
-            if data then
-                self.inspectData[guid] = data
-                if self.OnInspectComplete then self:OnInspectComplete(guid) end
+    if shouldCollect then
+        for _, unit in ipairs(BuildUnitList()) do
+            if UnitGUID(unit) == guid then
+                local data = CollectGearForUnit(unit)
+                if data then
+                    self.inspectData[guid] = data
+                    self.inspectQueue[unit] = nil  -- remove if they were queued
+                    if self.OnInspectComplete then self:OnInspectComplete(guid) end
+                end
+                break
             end
-            break
         end
     end
 
-    ClearInspectPlayer()
-    pendingGUID = nil
+    -- Cleanup if THIS was our pending inspect (regardless of whether we used the data)
+    if pendingGUID == guid then
+        ClearInspectPlayer()
+        pendingGUID = nil
+    end
 
-    -- Fire the next queued inspect immediately instead of waiting for the
-    -- 0.5s ticker. Cuts most of the per-person wall-clock latency.
+    -- Completion detection: pending stubs went from >0 to 0.
+    local pending = 0
+    for _, d in pairs(self.inspectData) do
+        if d.stub then pending = pending + 1 end
+    end
+    if pending == 0 and lastPendingCount > 0 then
+        self:Print("Refresh complete.")
+    end
+    lastPendingCount = pending
+
+    -- Fire next queued inspect immediately (no wait for 0.5s ticker).
     self:ProcessInspectQueue()
 end
 
