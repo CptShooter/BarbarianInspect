@@ -2,9 +2,10 @@
 ## Title: BarbarianInspect
 ## Notes: Raid/party inspect - items, enchants, gems quality
 ## Author: cptshooter12
-## Version: 1.0.0
+## Version: @project-version@
 ## IconTexture: Interface\AddOns\BarbarianInspect\Media\icon
 ## SavedVariables: BarbarianInspectDB
+## X-Curse-Project-ID: 1515379
 
 Init.lua
 Core\Events.lua

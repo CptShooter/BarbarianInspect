@@ -2,6 +2,15 @@
 
 All notable changes to this project. Dates in YYYY-MM-DD.
 
+## [1.0.1] — 2026-04-16
+
+Release infrastructure, no code changes.
+
+### Added
+- `.pkgmeta` for CurseForge automatic packaging.
+- GitHub Actions workflow (`.github/workflows/release.yml`) using BigWigsMods/packager — tagged releases auto-build and upload to CurseForge.
+- TOC now uses `@project-version@` (substituted by packager from the git tag) and declares `X-Curse-Project-ID: 1515379` so CurseForge App detects updates.
+
 ## [1.0.0] — 2026-04-16
 
 First public release.

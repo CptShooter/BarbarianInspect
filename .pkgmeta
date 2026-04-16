@@ -1,0 +1,9 @@
+package-as: BarbarianInspect
+
+manual-changelog: CHANGELOG.md
+license-output: LICENSE
+
+ignore:
+    - CLAUDE.md
+    - .gitignore
+    - .github
