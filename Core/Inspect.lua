@@ -31,13 +31,13 @@ local CRAFTED_PREFIX   = StripFormat(ITEM_CREATED_BY         or "Crafted by %s")
 
 -- Minimum time between our NotifyInspect calls. Throttle only applies when the
 -- server hasn't returned INSPECT_READY yet; on INSPECT_READY we fire the next
--- request immediately. MRT uses a similar pattern.
-local INSPECT_THROTTLE      = 0.2
+-- request immediately.
+local INSPECT_THROTTLE      = 0.1
 local INSPECT_TIMEOUT       = 5.0
 -- Back off this long when a different addon triggers an inspect we don't own.
 -- Kept short because we still collect data from their INSPECT_READY events
 -- (piggyback), so the backoff only exists to avoid cancelling their request.
-local OTHER_INSPECT_BACKOFF = 0.5
+local OTHER_INSPECT_BACKOFF = 0.4
 
 local lastInspectAt    = 0
 local pendingGUID      = nil
@@ -252,23 +252,37 @@ local function CollectGearForUnit(unit)
         end
     end
 
-    -- Compute average ilvl ourselves, identically for self and inspected units.
-    -- The Blizzard API is inconsistent here: GetAverageItemLevel() returns a float
-    -- for the local player, but GetInspectItemLevel() returns an integer (floor)
-    -- for others. Manual computation gives consistent decimals everywhere.
-    -- Rule: sum ilvls of all 16 slots / 16. If mainhand is equipped but offhand
-    -- is empty (2H weapon or single-wield), mainhand counts twice (same as the
-    -- Blizzard paperdoll and MRT).
-    local total = 0
+    -- Count items with a real ilvl. Partial scans (INSPECT_READY arriving
+    -- before the server sent all item data) return fewer — we detect that and
+    -- fall back to the API's overall ilvl instead of a wrong computed average.
+    --
+    -- 15 is the threshold because many players legitimately run with an empty
+    -- offhand (2H weapon, staff) — flagging those as partial would be wrong.
+    local itemCount, total = 0, 0
     for _, item in pairs(data.items) do
-        total = total + (item.ilvl or 0)
+        if item.ilvl and item.ilvl > 0 then
+            itemCount = itemCount + 1
+            total = total + item.ilvl
+        end
     end
-    local mh = data.items[INVSLOT_MAINHAND]
-    local oh = data.items[INVSLOT_OFFHAND]
-    if mh and not oh then
-        total = total + (mh.ilvl or 0)
+    data.itemCount = itemCount
+    data.partial   = itemCount < 15
+
+    if not data.partial then
+        -- Complete: compute our own precise average. If MH is equipped but OH
+        -- is empty (2H / single-wield), MH counts twice (same as paperdoll + MRT).
+        local mh = data.items[INVSLOT_MAINHAND]
+        local oh = data.items[INVSLOT_OFFHAND]
+        if mh and not oh then
+            total = total + (mh.ilvl or 0)
+        end
+        data.ilvl = total / 16
+    elseif UnitIsUnit(unit, "player") then
+        local _, equipped = GetAverageItemLevel()
+        data.ilvl = equipped or 0
+    else
+        data.ilvl = (GetInspectItemLevel and GetInspectItemLevel(unit)) or 0
     end
-    data.ilvl = total / 16
 
     return data
 end
@@ -348,14 +362,19 @@ function addon:RefreshAll()
         end
     end
 
-    -- Phase 2 (cheap): queue inspects for others. Count only the ones we
-    -- actually added (not the ones already in the queue from a prior call).
+    -- Phase 2 (cheap): queue inspects for others. Stubs AND partial scans
+    -- both count as "needs inspect". Manual Refresh resets the retry counter
+    -- on partial data so users get a fresh 3-attempt budget.
     local queuedCount = 0
     for _, u in ipairs(units) do
         if not UnitIsUnit(u, "player") then
             local guid = UnitGUID(u)
             local existing = guid and self.inspectData[guid]
-            if not existing or existing.stub then
+            local needs = not existing or existing.stub or existing.partial
+            if needs then
+                if existing and existing.partial then
+                    existing.scanAttempts = 0
+                end
                 if self:QueueInspect(u) then
                     queuedCount = queuedCount + 1
                 end
@@ -382,48 +401,73 @@ function addon:RefreshAll()
             if self.OnInspectComplete then self:OnInspectComplete(selfData.guid) end
         end
     end)
+
+    -- Kick the queue now instead of waiting up to 0.25s for the ticker.
+    self:ProcessInspectQueue()
 end
 
+local MAX_SCAN_ATTEMPTS = 5
+local RETRY_DELAY       = 1.5
+
+local function FindUnitForGUID(guid)
+    for _, u in ipairs(BuildUnitList()) do
+        if UnitGUID(u) == guid then return u end
+    end
+    return nil
+end
+
+local function TriggerCompletionIfDone()
+    local pending = 0
+    for _, d in pairs(addon.inspectData) do
+        if d.stub then pending = pending + 1 end
+    end
+    if pending == 0 and lastPendingCount > 0 then
+        addon:Print("Refresh complete.")
+    end
+    lastPendingCount = pending
+end
+
+-- MRT-style: parse immediately on INSPECT_READY, don't hold the inspect session.
+-- Partial scans (server fires INSPECT_READY before all items populated) retry
+-- through a fresh NotifyInspect a few seconds later.
 function addon.events:INSPECT_READY(guid)
-    -- Piggyback on other addons' inspects: if INSPECT_READY fires for a GUID we
-    -- have as a stub, collect data regardless of who initiated. MRT does the
-    -- same trick — it's why their inspect feels faster when multiple addons
-    -- are active.
     local existing = self.inspectData[guid]
-    local shouldCollect = existing and existing.stub
+    local shouldCollect = existing and (existing.stub or existing.partial)
 
     if shouldCollect then
-        for _, unit in ipairs(BuildUnitList()) do
-            if UnitGUID(unit) == guid then
-                local data = CollectGearForUnit(unit)
-                if data then
-                    self.inspectData[guid] = data
-                    self.inspectQueue[unit] = nil  -- remove if they were queued
-                    if self.OnInspectComplete then self:OnInspectComplete(guid) end
+        local unit = FindUnitForGUID(guid)
+        if unit then
+            local data = CollectGearForUnit(unit)
+            if data then
+                data.scanAttempts = (existing.scanAttempts or 0) + 1
+                self.inspectData[guid] = data
+                self.inspectQueue[unit] = nil
+
+                if data.partial and data.scanAttempts < MAX_SCAN_ATTEMPTS then
+                    local retryUnit = unit
+                    local retryGUID = guid
+                    C_Timer.After(RETRY_DELAY, function()
+                        local d = addon.inspectData[retryGUID]
+                        if d and d.partial then
+                            addon:QueueInspect(retryUnit)
+                        end
+                    end)
                 end
-                break
+
+                if self.OnInspectComplete then self:OnInspectComplete(guid) end
             end
         end
     end
 
-    -- Cleanup if THIS was our pending inspect (regardless of whether we used the data)
     if pendingGUID == guid then
         ClearInspectPlayer()
         pendingGUID = nil
     end
 
-    -- Completion detection: pending stubs went from >0 to 0.
-    local pending = 0
-    for _, d in pairs(self.inspectData) do
-        if d.stub then pending = pending + 1 end
-    end
-    if pending == 0 and lastPendingCount > 0 then
-        self:Print("Refresh complete.")
-    end
-    lastPendingCount = pending
+    TriggerCompletionIfDone()
 
-    -- Fire next queued inspect immediately (no wait for 0.5s ticker).
+    -- Fire next queued inspect immediately (don't wait for 0.25s ticker).
     self:ProcessInspectQueue()
 end
 
-C_Timer.NewTicker(0.5, function() addon:ProcessInspectQueue() end)
+C_Timer.NewTicker(0.25, function() addon:ProcessInspectQueue() end)

@@ -450,7 +450,13 @@ local function UpdateRow(row, data)
     end
 
     if data.ilvl and data.ilvl > 0 then
-        row.ilvl:SetText(("%.1f"):format(data.ilvl))
+        if data.partial then
+            -- Partial scan: API returns integer, show it as integer so the
+            -- format itself signals "not fully scanned yet".
+            row.ilvl:SetText(tostring(math.floor(data.ilvl)))
+        else
+            row.ilvl:SetText(("%.1f"):format(data.ilvl))
+        end
     else
         row.ilvl:SetText("...")
     end

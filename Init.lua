@@ -3,7 +3,7 @@ local addonName, addon = ...
 BarbarianInspectDB = BarbarianInspectDB or {}
 
 addon.name = addonName
-addon.version = "1.0.2"
+addon.version = "1.0.3"
 
 addon.events = {}
 addon.inspectQueue = {}

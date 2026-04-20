@@ -2,6 +2,20 @@
 
 All notable changes to this project. Dates in YYYY-MM-DD.
 
+## [1.0.3] — 2026-04-18
+
+### Added
+- **Partial-scan detection.** When `INSPECT_READY` fires before the server has populated all item data, rows now show the authoritative API ilvl as an **integer** (e.g. `259`) instead of a wrong computed average with decimals. Complete scans continue to show the precise computed value (`259.4`). The integer-vs-decimal format itself signals scan state — no extra UI indicator needed.
+- **Auto-retry for partial scans** — up to 5 re-attempts via fresh `NotifyInspect`, 1.5 s between tries. Manual Refresh resets the retry budget per-player.
+
+### Fixed
+- **Ziemniak / Report no longer flag not-yet-inspected players.** `CollectIssues` returns `nil` for stubs, so players with no gear data yet aren't reported as `crafts 0/2`.
+- **Inspect queue no longer deadlocks on partial scans.** Reverted an experimental `C_Timer.After(0.3)` parse-wait that held the inspect session for the entire window and prevented `ProcessInspectQueue` from firing the next request in time. Now parses immediately on `INSPECT_READY` (MRT-style) and relies on the retry mechanism above to clean up partial data.
+
+### Changed
+- `INSPECT_THROTTLE` 0.2 s → 0.1 s, `OTHER_INSPECT_BACKOFF` 0.5 s → 0.4 s, queue ticker 0.5 s → 0.25 s. Faster pickup between consecutive inspects.
+- `RefreshAll` now calls `ProcessInspectQueue` explicitly at the end, so the first `NotifyInspect` fires without waiting up to 0.25 s for the ticker.
+
 ## [1.0.2] — 2026-04-16
 
 ### Added
